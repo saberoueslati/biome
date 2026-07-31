@@ -1,16 +1,18 @@
-use crate::services::database::ResolvedImports;
+use crate::services::database::{DbService, ResolvedImports};
 use biome_analyze::{
-    Rule, RuleDiagnostic, RuleDomain, RuleSource, context::RuleContext, declare_lint_rule,
+    FromServices, Phase, Phases, Rule, RuleDiagnostic, RuleDomain, RuleKey, RuleMetadata,
+    RuleSource, ServiceBag, ServicesDiagnostic, context::RuleContext, declare_lint_rule,
 };
 use biome_console::markup;
 use biome_diagnostics::Severity;
 use biome_js_syntax::AnyJsImportLike;
-use biome_module_graph::{JsImportPath, JsImportPhase, JsModuleInfo};
+use biome_module_graph::{JsImportPath, JsImportPhase, JsModuleInfo, js_module_sccs};
 use biome_resolver::ResolvedPath;
 use biome_rowan::AstNode;
 use biome_rule_options::no_import_cycles::NoImportCyclesOptions;
 use camino::{Utf8Path, Utf8PathBuf};
 use rustc_hash::FxHashSet;
+use std::ops::Deref;
 
 declare_lint_rule! {
     /// Prevent import cycles.
@@ -159,7 +161,7 @@ declare_lint_rule! {
 }
 
 impl Rule for NoImportCycles {
-    type Query = ResolvedImports<AnyJsImportLike>;
+    type Query = ResolvedImports<AnyJsImportLike, ImportCyclesDbService>;
     type State = Box<[ResolvedPath]>;
     type Signals = Option<Self::State>;
     type Options = NoImportCyclesOptions;
@@ -182,6 +184,10 @@ impl Rule for NoImportCycles {
 
         // Don't check for cycles through node_modules imports.
         if is_node_modules_path(resolved_path_path) {
+            return None;
+        }
+
+        if !js_module_sccs(ctx.db()).contains_cycle_between(ctx.file_path(), resolved_path_path) {
             return None;
         }
 
@@ -310,4 +316,35 @@ fn find_cycle(
 /// Returns `true` if the given path is inside a `node_modules` directory.
 fn is_node_modules_path(path: &Utf8Path) -> bool {
     path.components().any(|c| c.as_str() == "node_modules")
+}
+
+/// Database service that computes import SCCs when the rule context is constructed.
+#[derive(Clone)]
+pub struct ImportCyclesDbService(DbService);
+
+impl Deref for ImportCyclesDbService {
+    type Target = DbService;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl FromServices for ImportCyclesDbService {
+    fn from_services(
+        rule_key: &RuleKey,
+        rule_metadata: &RuleMetadata,
+        services: &ServiceBag,
+    ) -> Result<Self, ServicesDiagnostic> {
+        let service = DbService::from_services(rule_key, rule_metadata, services)?;
+        // RuleContext constructs services before the rule profiler starts.
+        js_module_sccs(service.db());
+        Ok(Self(service))
+    }
+}
+
+impl Phase for ImportCyclesDbService {
+    fn phase() -> Phases {
+        DbService::phase()
+    }
 }

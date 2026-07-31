@@ -6,6 +6,7 @@ use biome_module_graph::{JsModuleInfo, ModuleDb, ModuleInfo};
 use biome_project_layout::ProjectLayout;
 use biome_rowan::{AstNode, Language, SyntaxNode, TextRange};
 use camino::Utf8Path;
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -71,29 +72,34 @@ impl Phase for DbService {
 
 /// Query type usable by lint rules that matches import statements and uses the
 /// database to resolve their specifiers.
+///
+/// `S` defaults to [`DbService`] and may wrap it to perform rule-specific
+/// preparation while the rule context is constructed.
 #[derive(Clone)]
-pub struct ResolvedImports<N>(N);
+pub struct ResolvedImports<N, S = DbService>(N, PhantomData<S>);
 
-impl<N, L> QueryMatch for ResolvedImports<N>
+impl<N, L, S> QueryMatch for ResolvedImports<N, S>
 where
     L: Language,
     N: AstNode<Language = L> + 'static,
+    S: 'static,
 {
     fn text_range(&self) -> TextRange {
         self.0.range()
     }
 }
 
-impl<N, L> Queryable for ResolvedImports<N>
+impl<N, L, S> Queryable for ResolvedImports<N, S>
 where
     L: Language + 'static,
     N: AstNode<Language = L> + 'static,
+    S: FromServices + Phase,
 {
     type Input = SyntaxNode<L>;
     type Output = N;
 
     type Language = L;
-    type Services = DbService;
+    type Services = S;
 
     fn build_visitor(analyzer: &mut impl AddVisitor<L>, _: &L::Root) {
         analyzer.add_visitor(Phases::Syntax, SyntaxVisitor::default);
